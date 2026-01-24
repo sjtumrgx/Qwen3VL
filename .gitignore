@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Local env
+.env
+
+# Artifacts
+models/
+logs/
+
+# Third party
+third_party/
+
+# AI tooling (do not commit)
+.claude/
+.zcf/
+openspec/
+AGENTS.md
+CLAUDE.md
+
+# OS
+.DS_Store

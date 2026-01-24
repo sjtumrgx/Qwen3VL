@@ -1,0 +1,20 @@
+# Qwen3-VL 推理服务依赖
+
+# 推理框架（LMDeploy/torch 在 Dockerfile 中安装并固定版本，避免被运行时覆盖）
+# 说明：Qwen3-VL 需要较新的 Transformers（包含 `Qwen3VLForConditionalGeneration`）。
+# LMDeploy 0.11.1 会打印版本范围警告，但在当前环境下已验证可用。
+transformers==4.57.6
+
+# Web 框架
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+
+# 图像处理
+Pillow>=10.0.0
+
+# 数据验证
+pydantic>=2.0.0
+
+# 工具
+requests>=2.31.0

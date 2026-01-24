@@ -1,0 +1,16 @@
+.git
+.gitignore
+.zcf
+.claude
+
+models
+logs
+third_party
+
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+.DS_Store

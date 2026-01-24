@@ -1,0 +1,86 @@
+version: "3.8"
+
+services:
+  qwen3vl-inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen3vl-inference:cuda122-uv-vllm
+    container_name: qwen3vl-inference
+    runtime: nvidia
+    ipc: host  # 共享内存，多进程推理需要
+
+    environment:
+      # 模型配置
+      - MODEL_PATH=/models/Qwen3-VL-32B-Instruct
+      - TENSOR_PARALLEL_SIZE=4
+      - MAX_MODEL_LEN=8192
+      - GPU_MEMORY_UTILIZATION=0.9
+
+      # LMDeploy 配置（FastAPI 将请求转发到该地址）
+      - LMDEPLOY_PORT=23333
+      - LMDEPLOY_BASE_URL=http://127.0.0.1:23333
+
+      # 推理配置
+      - MAX_TOKENS=2048
+      - TEMPERATURE=0.7
+      - TOP_P=0.9
+
+      # 服务配置
+      - HOST=0.0.0.0
+      - PORT=8000
+
+      # HuggingFace 配置
+      - HF_HOME=/workspace/.cache/huggingface
+      - HF_HUB_CACHE=/workspace/.cache/huggingface/hub
+
+      # NVIDIA GPU 配置
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+    volumes:
+      # 应用代码
+      - ./app:/workspace/app:ro
+      # 启动脚本和依赖
+      - ./scripts:/workspace/scripts:ro
+      - ./requirements.txt:/workspace/requirements.txt:ro
+      # 模型文件（只读）
+      - ./models:/models:ro
+      # 日志文件
+      - ./logs:/logs
+
+    working_dir: /workspace
+
+    ports:
+      # 主服务端口
+      - "20000:8000"
+      # 备用端口（用于未来扩展）
+      - "20001-20010:20001-20010"
+
+    # 启动命令：运行启动脚本
+    entrypoint: ["/bin/bash"]
+    command: ["/workspace/scripts/entrypoint.sh"]
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # 模型加载需要约 5 分钟
+
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
