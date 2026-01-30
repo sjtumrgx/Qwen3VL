@@ -183,7 +183,7 @@ async def process_frame(request: FrameRequest):
         # 如果没有历史结果，返回默认值（首帧场景）
         if not result:
             # 首帧：返回默认前进动作
-            from . import Waypoint
+            from .vln import Waypoint
             default_waypoints = [Waypoint(dx=0.3, dy=0.0, dtheta=0.0)]
             v, w = _waypoint_parser.waypoints_to_velocity(default_waypoints)
 
