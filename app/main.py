@@ -13,7 +13,7 @@ from typing import Optional
 import torch
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import config
 from .engine import LMDeployEngine, get_engine
@@ -22,7 +22,11 @@ from .models import (
     InferenceRequest,
     InferenceResponse,
     MultiModalRequest,
+    VideoAnalyzeRequest,
+    VideoAnalyzeResponse,
 )
+from .video import extract_frames_from_base64
+from .vln_api import router as vln_router
 
 # 配置日志
 logging.basicConfig(
@@ -77,6 +81,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 注册 VLN 路由
+app.include_router(vln_router)
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -107,17 +114,29 @@ async def list_models():
     }
 
 
-@app.post("/infer", response_model=InferenceResponse)
+@app.post("/infer")
 async def infer(request: InferenceRequest):
     """
     简单推理接口
 
-    支持文本和单张图像输入
+    支持文本和单张图像输入，支持流式输出（stream=true）
     """
     if engine is None:
         raise HTTPException(status_code=503, detail="模型尚未加载完成")
 
     try:
+        if request.stream:
+            return StreamingResponse(
+                engine.generate_stream(
+                    prompt=request.prompt,
+                    image=request.image,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                ),
+                media_type="text/event-stream",
+            )
+
         result = engine.generate(
             prompt=request.prompt,
             image=request.image,
@@ -176,12 +195,23 @@ async def chat_completions(request: MultiModalRequest):
     """
     OpenAI 兼容的聊天补全接口
 
-    支持多模态输入（文本 + 图像）
+    支持多模态输入（文本 + 图像），支持流式输出（stream=true）
     """
     if engine is None:
         raise HTTPException(status_code=503, detail="模型尚未加载完成")
 
     try:
+        if request.stream:
+            return StreamingResponse(
+                engine.generate_from_messages_stream(
+                    messages=request.messages,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                ),
+                media_type="text/event-stream",
+            )
+
         result = engine.generate_from_messages(
             messages=request.messages,
             max_tokens=request.max_tokens,
@@ -316,6 +346,130 @@ async def gpu_status():
         )
 
     return {"available": True, "gpu_count": len(gpus), "gpus": gpus}
+
+
+@app.post("/analyze/video")
+async def analyze_video(request: VideoAnalyzeRequest):
+    """
+    视频分析接口
+
+    将视频抽帧后进行多帧分析，支持流式输出（stream=true）
+    """
+    if engine is None:
+        raise HTTPException(status_code=503, detail="模型尚未加载完成")
+
+    try:
+        # 从视频中抽取帧
+        frames = extract_frames_from_base64(
+            video_base64=request.video,
+            max_frames=request.max_frames,
+        )
+
+        if not frames:
+            raise ValueError("无法从视频中抽取帧")
+
+        # 构建多图消息
+        content = []
+        for frame in frames:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{frame}"},
+            })
+        content.append({"type": "text", "text": request.instruction})
+
+        messages = [{"role": "user", "content": content}]
+
+        if request.stream:
+            return StreamingResponse(
+                engine.generate_from_messages_stream(
+                    messages=messages,
+                    max_tokens=request.max_tokens,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                ),
+                media_type="text/event-stream",
+            )
+
+        result = engine.generate_from_messages(
+            messages=messages,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+        )
+
+        return VideoAnalyzeResponse(
+            analysis=result["text"],
+            frames_extracted=len(frames),
+            tokens={
+                "prompt": result["prompt_tokens"],
+                "completion": result["completion_tokens"],
+                "total": result["total_tokens"],
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"视频分析失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/analyze/video/upload")
+async def analyze_video_upload(
+    video: UploadFile = File(..., description="视频文件"),
+    instruction: str = Form(..., description="分析指令"),
+    max_frames: int = Form(default=8, description="最大抽帧数量"),
+    max_tokens: Optional[int] = Form(None, description="最大生成 token 数"),
+):
+    """
+    视频分析接口（文件上传）
+
+    支持直接上传视频文件进行分析
+    """
+    if engine is None:
+        raise HTTPException(status_code=503, detail="模型尚未加载完成")
+
+    try:
+        # 读取并编码视频
+        video_data = await video.read()
+        video_base64 = base64.b64encode(video_data).decode("utf-8")
+
+        # 从视频中抽取帧
+        frames = extract_frames_from_base64(
+            video_base64=video_base64,
+            max_frames=max_frames,
+        )
+
+        if not frames:
+            raise ValueError("无法从视频中抽取帧")
+
+        # 构建多图消息
+        content = []
+        for frame in frames:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{frame}"},
+            })
+        content.append({"type": "text", "text": instruction})
+
+        messages = [{"role": "user", "content": content}]
+
+        result = engine.generate_from_messages(
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+
+        return {
+            "analysis": result["text"],
+            "frames_extracted": len(frames),
+            "tokens": {
+                "prompt": result["prompt_tokens"],
+                "completion": result["completion_tokens"],
+                "total": result["total_tokens"],
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"视频分析失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
