@@ -147,9 +147,10 @@ async def create_task(request: CreateTaskRequest):
 @router.post("/frame", response_model=FrameResponse)
 async def process_frame(request: FrameRequest):
     """
-    处理单帧图像
+    处理单帧图像（非阻塞模式）
 
-    提交帧到推理流水线，返回导航结果和可视化帧
+    提交帧到推理流水线，立即返回最新结果（不等待当前帧推理完成）
+    这确保了 3-5Hz 的响应速度
     """
     try:
         task_manager = get_task_manager()
@@ -166,51 +167,59 @@ async def process_frame(request: FrameRequest):
 
         timestamp = request.timestamp or time.time()
 
-        # 提交到推理流水线
+        # 提交到推理流水线（非阻塞）
         pipeline = get_inference_pipeline()
 
-        # 创建事件等待结果
-        result_event = asyncio.Event()
-        result_holder = {"result": None}
-
-        async def on_result(result: InferenceResult):
-            result_holder["result"] = result
-            result_event.set()
-
-        # 提交帧
-        submitted = await pipeline.submit_frame(
+        # 提交帧，不等待结果
+        await pipeline.submit_frame(
             task_id=request.task_id,
             image_base64=request.frame,
             timestamp=timestamp,
-            callback=on_result,
         )
 
-        if submitted:
-            # 等待推理结果（最多等待 10 秒）
-            try:
-                await asyncio.wait_for(result_event.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                # 超时，使用上次结果
-                result_holder["result"] = pipeline.get_latest_result(request.task_id)
+        # 立即获取最新结果（可能是上一帧的结果）
+        result = pipeline.get_latest_result(request.task_id)
 
-        result = result_holder["result"]
-
-        # 如果没有新结果，使用任务当前状态
+        # 如果没有历史结果，返回默认值（首帧场景）
         if not result:
-            result = InferenceResult(
+            # 首帧：返回默认前进动作
+            from . import Waypoint
+            default_waypoints = [Waypoint(dx=0.3, dy=0.0, dtheta=0.0)]
+            v, w = _waypoint_parser.waypoints_to_velocity(default_waypoints)
+
+            # 生成可视化帧（带默认信息）
+            visualized_frame = None
+            if task.config.enable_visualization:
+                frame = _visualizer.base64_to_frame(request.frame)
+                if frame is not None:
+                    rendered = _visualizer.render_frame(
+                        frame=frame,
+                        waypoints=default_waypoints,
+                        environment="正在分析环境...",
+                        action="等待推理",
+                        linear_vel=v,
+                        angular_vel=w,
+                        progress=0.0,
+                    )
+                    visualized_frame = _visualizer.frame_to_base64(rendered)
+
+            return FrameResponse(
                 task_id=request.task_id,
                 frame_id=task.frame_count,
-                timestamp=timestamp,
-                waypoints=task.current_waypoints,
-                environment=task.current_environment,
-                action=task.current_action,
-                reasoning="",
+                waypoints=[
+                    WaypointResponse(dx=0.3, dy=0.0, dtheta=0.0, confidence=0.5)
+                ],
+                environment="正在分析环境...",
+                action="等待推理",
+                linear_vel=v,
+                angular_vel=w,
                 progress=0.0,
                 reached_goal=False,
+                visualized_frame=visualized_frame,
                 inference_time=0.0,
             )
 
-        # 计算速度
+        # 有历史结果，使用最新结果
         v, w = _waypoint_parser.waypoints_to_velocity(result.waypoints)
 
         # 生成可视化帧
@@ -255,6 +264,104 @@ async def process_frame(request: FrameRequest):
         raise
     except Exception as e:
         logger.error(f"处理帧失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/frame/sync", response_model=FrameResponse)
+async def process_frame_sync(request: FrameRequest):
+    """
+    处理单帧图像（同步模式）
+
+    提交帧到推理流水线，等待推理完成后返回结果
+    适用于测试或需要确保获取当前帧推理结果的场景
+    """
+    try:
+        task_manager = get_task_manager()
+        task = task_manager.get_task(request.task_id)
+
+        if not task:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {request.task_id}")
+
+        if task.status not in (TaskStatus.RUNNING, TaskStatus.CREATED):
+            raise HTTPException(
+                status_code=400,
+                detail=f"任务状态不允许处理帧: {task.status.value}",
+            )
+
+        timestamp = request.timestamp or time.time()
+        pipeline = get_inference_pipeline()
+
+        # 创建事件等待结果
+        result_event = asyncio.Event()
+        result_holder = {"result": None}
+
+        async def on_result(result: InferenceResult):
+            result_holder["result"] = result
+            result_event.set()
+
+        # 提交帧
+        submitted = await pipeline.submit_frame(
+            task_id=request.task_id,
+            image_base64=request.frame,
+            timestamp=timestamp,
+            callback=on_result,
+        )
+
+        if submitted:
+            # 等待推理结果（最多等待 60 秒）
+            try:
+                await asyncio.wait_for(result_event.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                result_holder["result"] = pipeline.get_latest_result(request.task_id)
+
+        result = result_holder["result"]
+
+        if not result:
+            raise HTTPException(status_code=500, detail="推理超时，无结果返回")
+
+        v, w = _waypoint_parser.waypoints_to_velocity(result.waypoints)
+
+        visualized_frame = None
+        if task.config.enable_visualization:
+            frame = _visualizer.base64_to_frame(request.frame)
+            if frame is not None:
+                rendered = _visualizer.render_frame(
+                    frame=frame,
+                    waypoints=result.waypoints,
+                    environment=result.environment,
+                    action=result.action,
+                    linear_vel=v,
+                    angular_vel=w,
+                    progress=result.progress,
+                )
+                visualized_frame = _visualizer.frame_to_base64(rendered)
+
+        return FrameResponse(
+            task_id=result.task_id,
+            frame_id=result.frame_id,
+            waypoints=[
+                WaypointResponse(
+                    dx=wp.dx,
+                    dy=wp.dy,
+                    dtheta=wp.dtheta,
+                    confidence=wp.confidence,
+                )
+                for wp in result.waypoints
+            ],
+            environment=result.environment,
+            action=result.action,
+            linear_vel=v,
+            angular_vel=w,
+            progress=result.progress,
+            reached_goal=result.reached_goal,
+            visualized_frame=visualized_frame,
+            inference_time=result.inference_time,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"同步处理帧失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
