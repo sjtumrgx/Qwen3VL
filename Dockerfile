@@ -44,10 +44,13 @@ COPY "README.md" "/workspace/README.md"
 COPY "app" "/workspace/app"
 RUN uv pip install --no-cache -e "/workspace"
 
+# Install WebUI dependencies (gradio)
+RUN uv pip install --no-cache "gradio>=4.0.0"
+
 # Copy code for standalone usage (compose may still mount it)
 COPY "scripts" "/workspace/scripts"
 RUN chmod +x "/workspace/scripts/entrypoint.sh"
 
-EXPOSE 8000
+EXPOSE 8000 7860
 ENTRYPOINT ["/bin/bash"]
 CMD ["/workspace/scripts/entrypoint.sh"]
