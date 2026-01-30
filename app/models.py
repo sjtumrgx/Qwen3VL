@@ -28,6 +28,7 @@ class InferenceRequest(BaseModel):
     max_tokens: Optional[int] = Field(None, description="最大生成 token 数")
     temperature: Optional[float] = Field(None, description="采样温度")
     top_p: Optional[float] = Field(None, description="Top-p 采样")
+    stream: bool = Field(default=False, description="是否启用流式输出")
 
 
 class MultiModalRequest(BaseModel):
@@ -37,6 +38,7 @@ class MultiModalRequest(BaseModel):
     max_tokens: Optional[int] = Field(None, description="最大生成 token 数")
     temperature: Optional[float] = Field(None, description="采样温度")
     top_p: Optional[float] = Field(None, description="Top-p 采样")
+    stream: bool = Field(default=False, description="是否启用流式输出")
 
 
 class InferenceResponse(BaseModel):
@@ -54,3 +56,23 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="服务状态")
     model: str = Field(..., description="模型名称")
     gpu_count: int = Field(..., description="GPU 数量")
+
+
+class VideoAnalyzeRequest(BaseModel):
+    """视频分析请求"""
+
+    video: str = Field(..., description="Base64 编码的视频数据")
+    instruction: str = Field(..., description="分析指令")
+    max_frames: int = Field(default=8, description="最大抽帧数量", ge=1, le=32)
+    max_tokens: Optional[int] = Field(None, description="最大生成 token 数")
+    temperature: Optional[float] = Field(None, description="采样温度")
+    top_p: Optional[float] = Field(None, description="Top-p 采样")
+    stream: bool = Field(default=False, description="是否启用流式输出")
+
+
+class VideoAnalyzeResponse(BaseModel):
+    """视频分析响应"""
+
+    analysis: str = Field(..., description="分析结果")
+    frames_extracted: int = Field(..., description="实际抽取的帧数")
+    tokens: dict = Field(..., description="Token 使用统计")

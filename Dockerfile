@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     python3-pip \
     python3-venv \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (used for all Python dependency installs)
@@ -37,11 +39,12 @@ RUN uv pip install --no-cache \
     --extra-index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
 
 # Install application dependencies (without torch to avoid overrides)
-COPY "requirements.txt" "/workspace/requirements.txt"
-RUN uv pip install --no-cache -r "/workspace/requirements.txt"
+COPY "pyproject.toml" "/workspace/pyproject.toml"
+COPY "README.md" "/workspace/README.md"
+COPY "app" "/workspace/app"
+RUN uv pip install --no-cache -e "/workspace"
 
 # Copy code for standalone usage (compose may still mount it)
-COPY "app" "/workspace/app"
 COPY "scripts" "/workspace/scripts"
 RUN chmod +x "/workspace/scripts/entrypoint.sh"
 

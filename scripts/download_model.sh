@@ -15,7 +15,8 @@ export MODELSCOPE_DOMAIN=www.modelscope.ai
 # 检查 modelscope CLI 是否安装
 if ! command -v modelscope &> /dev/null; then
   echo "错误: modelscope 未安装（找不到 modelscope 命令）"
-  echo "请运行: uv pip install -U modelscope"
+  echo "请运行: python3 -m pip install -U modelscope"
+  echo "或使用 uv: uv pip install -U modelscope"
   exit 1
 fi
 

@@ -4,8 +4,9 @@ LMDeploy 推理引擎封装
 通过 LMDeploy OpenAI API Server 推理 Qwen3-VL（FastAPI 作为轻量适配层）
 """
 
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import requests
 
@@ -171,6 +172,87 @@ class LMDeployEngine:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
         }
+
+    def generate_stream(
+        self,
+        prompt: str,
+        image: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+    ) -> Generator[str, None, None]:
+        """
+        流式生成（单图或纯文本）
+
+        Yields:
+            SSE 格式的数据块
+        """
+        content: Any
+        if image:
+            content = [
+                {"type": "image_url", "image_url": {"url": _ensure_data_url(image)}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            content = prompt
+
+        messages = [{"role": "user", "content": content}]
+        yield from self.generate_from_messages_stream(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+
+    def generate_from_messages_stream(
+        self,
+        messages: List[dict],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+    ) -> Generator[str, None, None]:
+        """
+        流式生成（多轮对话/多图）
+
+        Yields:
+            SSE 格式的数据块
+        """
+        model = self._resolved_model or self.model_name
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": _normalize_messages(messages),
+            "max_tokens": max_tokens or config.max_tokens,
+            "temperature": temperature if temperature is not None else config.temperature,
+            "top_p": top_p if top_p is not None else config.top_p,
+            "stream": True,
+        }
+
+        with requests.post(
+            f"{self.base_url}/v1/chat/completions",
+            json=payload,
+            timeout=self.timeout_s,
+            stream=True,
+        ) as resp:
+            resp.raise_for_status()
+
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                # SSE 格式: "data: {...}" 或 "data: [DONE]"
+                if line.startswith("data:"):
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        break
+
+                    try:
+                        # 直接转发 LMDeploy 的 SSE 数据
+                        yield f"data: {data_str}\n\n"
+                    except Exception as e:
+                        logger.warning(f"解析流式数据失败: {e}")
+                        continue
 
 
 def get_engine() -> LMDeployEngine:

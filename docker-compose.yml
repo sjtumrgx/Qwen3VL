@@ -41,6 +41,7 @@ services:
     volumes:
       # 应用代码
       - ./app:/workspace/app:ro
+      - ./video:/workspace/video:ro
       # 启动脚本和依赖
       - ./scripts:/workspace/scripts:ro
       - ./requirements.txt:/workspace/requirements.txt:ro
@@ -54,6 +55,8 @@ services:
     ports:
       # 主服务端口
       - "20000:8000"
+      # WebUI 端口
+      - "7860:7860"
       # 备用端口（用于未来扩展）
       - "20001-20010:20001-20010"
 
