@@ -103,9 +103,12 @@ lmdeploy_pid="$!"
 set -e
 
 cleanup() {
-  if [ -n "${lmdeploy_pid:-}" ] && kill -0 "${lmdeploy_pid}" 2>/dev/null; then
-    kill "${lmdeploy_pid}" 2>/dev/null || true
-  fi
+  echo "正在停止所有服务..."
+  for pid in "${webui_pid:-}" "${fastapi_pid:-}" "${lmdeploy_pid:-}"; do
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+    fi
+  done
 }
 trap cleanup EXIT
 
@@ -125,4 +128,36 @@ done
 echo "=========================================="
 echo "启动 FastAPI 服务..."
 echo "=========================================="
-exec python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level info 2>&1 | sed -u 's/^/[fastapi] /' &
+fastapi_pid="$!"
+
+# 等待 FastAPI 就绪
+echo "等待 FastAPI 就绪..."
+for i in $(seq 1 60); do
+  if curl -fsS "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+    echo "FastAPI 已就绪"
+    break
+  fi
+  if ! kill -0 "${fastapi_pid}" 2>/dev/null; then
+    echo "FastAPI 进程已退出，请检查上方日志"
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "=========================================="
+echo "启动 VLN WebUI..."
+echo "=========================================="
+# WebUI 连接容器内部的 FastAPI (port 8000)
+python3 -m app.vln_webui --host 0.0.0.0 --port 7860 --api-url http://127.0.0.1:8000 2>&1 | sed -u 's/^/[webui] /' &
+webui_pid="$!"
+
+echo "=========================================="
+echo "所有服务已启动"
+echo "  - LMDeploy: http://0.0.0.0:${LMDEPLOY_PORT}"
+echo "  - FastAPI:  http://0.0.0.0:8000"
+echo "  - WebUI:    http://0.0.0.0:7860"
+echo "=========================================="
+
+# 等待任意进程退出
+wait -n "${lmdeploy_pid}" "${fastapi_pid}" "${webui_pid}" 2>/dev/null || wait "${fastapi_pid}"
