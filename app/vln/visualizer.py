@@ -10,10 +10,40 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from . import Waypoint
 
 logger = logging.getLogger(__name__)
+
+# 中文字体路径候选列表（按优先级）
+FONT_PATHS = [
+    # Linux 常见路径
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    # macOS
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    # Windows
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+]
+
+
+def _load_chinese_font(size: int = 16) -> ImageFont.FreeTypeFont:
+    """加载中文字体，失败则返回默认字体"""
+    for font_path in FONT_PATHS:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except (OSError, IOError):
+            continue
+    logger.warning("未找到中文字体，使用默认字体（中文可能显示异常）")
+    return ImageFont.load_default()
 
 
 class Visualizer:
@@ -52,6 +82,9 @@ class Visualizer:
         self.path_thickness = path_thickness
         self.box_alpha = box_alpha
         self.font = cv2.FONT_HERSHEY_SIMPLEX
+        # 加载中文字体
+        self._pil_font = _load_chinese_font(size=int(16 * font_scale / 0.5))
+        self._pil_font_small = _load_chinese_font(size=int(14 * font_scale / 0.5))
 
     def render_frame(
         self,
@@ -144,6 +177,11 @@ class Visualizer:
 
         从图像底部中央开始，根据航点绘制渐变色路径
         绿色（近）→ 黄色（中）→ 红色（远）
+
+        坐标系说明：
+        - 机器人坐标系：dx 前进（正向前），dy 横移（正向左），dtheta 旋转（正逆时针）
+        - 图像坐标系：x 向右增大，y 向下增大
+        - 转换：机器人前进 → 图像向上（y减小），机器人左移 → 图像向左（x减小）
         """
         h, w = frame.shape[:2]
 
@@ -154,20 +192,32 @@ class Visualizer:
         # 将航点转换为像素坐标
         points = [(start_x, start_y)]
         current_x, current_y = float(start_x), float(start_y)
-        current_theta = 0.0  # 当前朝向（向上为0）
+        current_theta = 0.0  # 当前朝向（图像坐标系中，0 表示向上）
 
         for wp in waypoints:
-            # 更新朝向
+            # 先旋转，再移动（更符合实际机器人运动）
             current_theta += wp.dtheta
 
-            # 计算位移（图像坐标系：y向下为正）
-            # dx: 前进距离 -> 图像中向上
-            # dy: 横向距离 -> 图像中向左为正
-            dx_pixel = -wp.dx * scale * np.cos(current_theta) + wp.dy * scale * np.sin(current_theta)
-            dy_pixel = -wp.dx * scale * np.sin(current_theta) - wp.dy * scale * np.cos(current_theta)
+            # 机器人坐标系到图像坐标系的转换：
+            # - 机器人 dx（前进）→ 沿当前朝向移动
+            # - 机器人 dy（左移）→ 垂直于朝向向左移动
+            # 图像坐标系中：向上为 -y，向左为 -x
+            # current_theta = 0 时朝向图像上方
 
-            current_x += dy_pixel  # 注意坐标转换
-            current_y += dx_pixel
+            # 前进方向在图像中的分量
+            forward_x = np.sin(current_theta)   # 朝向的 x 分量
+            forward_y = -np.cos(current_theta)  # 朝向的 y 分量（向上为负）
+
+            # 左移方向在图像中的分量（垂直于前进方向，逆时针90度）
+            left_x = -np.cos(current_theta)     # 左方向的 x 分量
+            left_y = -np.sin(current_theta)     # 左方向的 y 分量
+
+            # 计算像素位移
+            dx_pixel = (wp.dx * forward_x + wp.dy * left_x) * scale
+            dy_pixel = (wp.dx * forward_y + wp.dy * left_y) * scale
+
+            current_x += dx_pixel
+            current_y += dy_pixel
 
             # 限制在图像范围内
             current_x = max(0, min(w - 1, current_x))
@@ -273,7 +323,7 @@ class Visualizer:
         max_width: int = 250,
         padding: int = 10,
     ) -> np.ndarray:
-        """绘制信息框"""
+        """绘制信息框（支持中文）"""
         h, w = frame.shape[:2]
 
         # 文本换行
@@ -319,21 +369,41 @@ class Visualizer:
             1,
         )
 
-        # 绘制文本
-        for i, line in enumerate(lines):
-            text_y = y + padding + (i + 1) * line_height - 5
-            cv2.putText(
-                frame,
-                line,
-                (x + padding, text_y),
-                self.font,
-                self.font_scale,
-                text_color,
-                1,
-                cv2.LINE_AA,
-            )
+        # 使用 PIL 绘制中文文本
+        frame = self._put_chinese_text(
+            frame,
+            lines,
+            x + padding,
+            y + padding,
+            line_height,
+            text_color,
+        )
 
         return frame
+
+    def _put_chinese_text(
+        self,
+        frame: np.ndarray,
+        lines: List[str],
+        x: int,
+        y: int,
+        line_height: int,
+        color: Tuple[int, int, int],
+    ) -> np.ndarray:
+        """使用 PIL 绘制中文文本"""
+        # OpenCV BGR -> PIL RGB
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+
+        # BGR -> RGB 颜色转换
+        rgb_color = (color[2], color[1], color[0])
+
+        for i, line in enumerate(lines):
+            text_y = y + i * line_height
+            draw.text((x, text_y), line, font=self._pil_font, fill=rgb_color)
+
+        # PIL RGB -> OpenCV BGR
+        return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     def _wrap_text(self, text: str, max_width: int) -> List[str]:
         """文本换行"""
@@ -360,7 +430,7 @@ class Visualizer:
         frame: np.ndarray,
         box: Tuple[int, int, int, int, str],
     ) -> np.ndarray:
-        """绘制检测框"""
+        """绘制检测框（支持中文标签）"""
         x1, y1, x2, y2, label = box
 
         # 绘制框
@@ -374,24 +444,27 @@ class Visualizer:
 
         # 绘制标签
         if label:
-            label_size = cv2.getTextSize(label, self.font, self.font_scale, 1)[0]
+            # 使用 PIL 计算文本大小并绘制
+            pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_img)
+            bbox = draw.textbbox((0, 0), label, font=self._pil_font_small)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+
+            # 绘制标签背景
             cv2.rectangle(
                 frame,
-                (x1, y1 - label_size[1] - 10),
-                (x1 + label_size[0] + 10, y1),
+                (x1, y1 - text_h - 10),
+                (x1 + text_w + 10, y1),
                 self.COLOR_DETECTION_BOX,
                 -1,
             )
-            cv2.putText(
-                frame,
-                label,
-                (x1 + 5, y1 - 5),
-                self.font,
-                self.font_scale,
-                (0, 0, 0),
-                1,
-                cv2.LINE_AA,
-            )
+
+            # 使用 PIL 绘制文本
+            pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_img)
+            draw.text((x1 + 5, y1 - text_h - 5), label, font=self._pil_font_small, fill=(0, 0, 0))
+            frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
         return frame
 
@@ -400,35 +473,36 @@ class Visualizer:
         frame: np.ndarray,
         gesture: str,
     ) -> np.ndarray:
-        """绘制手势状态"""
+        """绘制手势状态（支持中文）"""
         h, w = frame.shape[:2]
 
         # 顶部中央
         text = f"[{gesture.upper()}]"
-        text_size = cv2.getTextSize(text, self.font, self.font_scale, 1)[0]
-        x = (w - text_size[0]) // 2
+
+        # 使用 PIL 计算文本大小
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        bbox = draw.textbbox((0, 0), text, font=self._pil_font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        x = (w - text_w) // 2
         y = 30
 
         # 背景
         cv2.rectangle(
             frame,
-            (x - 5, y - text_size[1] - 5),
-            (x + text_size[0] + 5, y + 5),
+            (x - 5, y - 5),
+            (x + text_w + 5, y + text_h + 5),
             self.COLOR_GESTURE_BOX,
             -1,
         )
 
-        # 文字
-        cv2.putText(
-            frame,
-            text,
-            (x, y),
-            self.font,
-            self.font_scale,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
+        # 使用 PIL 绘制文本
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        draw.text((x, y), text, font=self._pil_font, fill=(255, 255, 255))
+        frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
         return frame
 
