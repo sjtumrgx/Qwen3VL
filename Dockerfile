@@ -14,7 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     libgl1 \
     libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-cache -fv
 
 # Install uv (used for all Python dependency installs)
 RUN python3 -m pip install --no-cache-dir "uv==0.9.26"
